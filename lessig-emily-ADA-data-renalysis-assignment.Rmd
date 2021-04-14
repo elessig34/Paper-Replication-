@@ -1,0 +1,308 @@
+---
+title: "less-emily-ADA-data-reanalysis-assignment"
+author: "Emily Lessig"
+date: "4/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+Introduction and setup
+
+The article titled "Capuchins, space, time and memory: an experimental test of what-where-when memory in wild monkeys" tests whether wild capuchin monkeys in Argentina can track and use elapsed time in addition to location and amount of food at patches as a basis for decision making. Monkeys were presented with an experimental array of eight feeding sites, at each of which food reward increased with increasing elapsed time since the previous visit. Observations were compared to simulated movements and multinomial statistical models. 
+
+To test whether a particular cognitive variable had a significant effect on the observed movement choices, the author tested a small sequence of progressively more complex cognitive models of distination profitability. Each successively more complex model incorporates one more kind of information or level of spatial integration. If a more complex cognitive model predicted the capuchins' behaviors significantly better than did a less complex model, the author concluded they must be capable of sensing and using the added kind of informaiton.
+
+Overall, the author found that capuchin monkeys posses and use integrated memories of prior food patch use such as where a patch is relative to their current location, how productive the patch is and how long it has been since they last visited the patch. 
+
+
+In my attempt to replicate this analysis, I have reproduced the analysis for H1 and H2. I have created models using GLMM. I calculated the profitability for each destination site, the profitability of visiting each site, calculated T statistics, ran permutations, and created histograms comparing H1 and H2 models. I also created a network to look at the movement patterns of the monkeys. 
+
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(skimr)
+library(kableExtra)
+library(dplyr)
+library(summarytools)
+library(igraph)
+library(lme4)
+
+```
+
+```{r}
+#Data used for analysis 
+
+
+data <- read_excel("~/Downloads/Janson_data.xlsx")
+
+#show a few lines of raw data
+head(data)
+tail(data)
+
+#examine dataset 
+str(data)
+dim(data) #1696 observations of 9 variables 
+names(data)
+colnames(data)
+
+#quick overview of variables in data frame
+summary(data)
+
+#formatted summary of data
+s <- skim(data)
+s %>%
+  filter(skim_type =="numeric") %>%
+  rename(
+    variable=skim_variable, missing=n_missing, mean=numeric.mean,
+    sd=numeric.sd, min=numeric.p0, p25 = numeric.p25, median=numeric.p50,
+    p75=numeric.p75, max=numeric.p100, hist=numeric.hist
+  ) %>%
+  select(variable, missing, mean, sd, min, median, max, hist) %>%
+  kable() %>%
+  kable_styling(font_size = 10) 
+
+detach(package:skimr)
+detach(package:kableExtra)
+
+s <- descr(data, style = "rmarkdown", transpose = TRUE)
+
+s %>% summarytools::view()
+s <- dfSummary(data, style = "grid", plain.ascii = FALSE)
+s %>% summarytools::view()
+detach(package:summarytools)
+
+
+```
+"Analysis of the movement decisions used the ‘Choice’ platform in JMP (v. 11.0.0; SAS Software Corp.), which implements a multinomial logistic regression of the observed choices as a function of the characteristics of the options provided at each trial"
+
+
+To replicate this, I ran a GLMM. "If a more complex model did not fit significantly better than a simpler model, the simpler model was considered the most parsimonious model for the data"
+
+
+"Distance to feeding site, the site's renewal treatment and the elapsed time since a site was last visited all contributed significantly to explaining observed movement choices." 
+
+
+
+```{r}
+
+H0 <- lm(data$`visited?` ~ data$`Distance to destination`)
+summary(H0)
+
+
+H1 <- lm(data$`visited?` ~ data$`Distance to destination` + data$`Renewal rate (banana pieces/hr) at destination site`)
+summary(H1)
+
+H2 <- lm(data$`visited?` ~ data$`Distance to destination` + data$`Renewal rate (banana pieces/hr) at destination site`+ data$`Elapsed Time since last visit to destination site`)
+summary(H2)
+
+H3 <- lmer(data$`visited?` ~ data$`Distance to destination` + data$`Renewal rate (banana pieces/hr) at destination site`+ data$`Elapsed Time since last visit to destination site` + (1 | data$`Destination Site`))
+summary(H3)
+
+#I included the
+#choice site as a predictor variable (to account for possible attractive qualities of each destination site
+#that are not accounted for by the other predictor variables), but leaving it out does not change the
+#qualitative result that all the other predictor variables have significant effects.
+
+
+```
+
+Create two vectors- one for the H1 reward and one for the H2 reward- and add them to the data frame 
+
+"I calculated profitability for each destination site as the expected reward there divided by distance to the site."
+
+"In the base profitability model (H1), I used as the expected reward the number of banana pieces associated with a constant
+24 h delay"
+
+```{r}
+
+H1_reward <- 24*data$`Renewal rate (banana pieces/hr) at destination site`/data$`Distance to destination`
+
+```
+
+H2 model "calculates the expected reward at each destination site based on the actual elapsed time since the previous visit to that site"
+
+```{r}
+
+H2_reward <- data$`Elapsed Time since last visit to destination site`*data$`Renewal rate (banana pieces/hr) at destination site`/
+  data$`Distance to destination`
+
+```
+
+Add these rewards to the data frame
+
+```{r}
+
+data <- cbind(data, H1_reward, H2_reward)
+
+```
+
+Calculate the expected utility of visiting each site j in the ith choice (Uij):
+
+"From these utilities, the expected probability of visiting each site is given by formula (2.1)"
+
+```{r}
+
+#run a for loop on all observations (choices):
+
+unq_choice <- unique(data$`Choice Number`)
+
+all_P_H1 <- rep(NA, length(unq_choice))
+all_P_H2 <- rep(NA, length(unq_choice))
+
+for (i in 1:length(unq_choice)) {
+  #find the index for all possible choices in the ith choice
+  ix=data$`Choice Number`==unq_choice[i]
+  #find the line number of the choice the capuchins Actually made:
+  ix_Uij=which(data$`visited?`[ix]==1)
+  
+  #implement equation 2.1 for H1:
+  P_H1=exp(data$H1_reward[ix_Uij])/
+    sum(exp(data$H1_reward[ix]), na.rm = TRUE)
+  
+  #implement equation 2.1 for H2:
+  P_H2=exp(data$H2_reward[ix_Uij])/
+    sum(exp(data$H2_reward[ix]))
+  
+  #save results as a vector:
+  all_P_H1[i]=P_H1
+  all_P_H2[i]=P_H2
+}
+
+```
+
+Next, get T1 and T2
+
+"I summed the ln(Pij) corresponding to the actual destination site observed in each choice across all i, yielding a single statistic, T"
+
+For each model, there is a corresponding T (e.g. H1 produces T1; H2 produces T2)
+
+```{r}
+
+#for H1:
+T1 <- sum(log(all_P_H1))
+
+#for H2:
+T2 <- sum(log(all_P_H2))
+
+```
+
+Run the permutation
+
+"I simulated the variability in T for a given model by making random simulated choices of site in j in proportion to the Pij for each choice in "
+
+```{r}
+
+#create a random distribution for Ts based on the 2 hypotheses to compare if the observed T is different from random:
+
+iter=10000 #number of permutations to run 
+
+all_perm_P_H1 <- matrix(NA,nrow = length(unq_choice), ncol = iter)
+all_perm_P_H2 <- matrix(NA,nrow = length(unq_choice), ncol = iter)
+
+
+
+#first loop for choice number 
+
+for (i in 1:length(unq_choice)) {
+  ix=data$`Choice Number`==unq_choice[i] #find all possible choices for the ith choice
+  data_for_perm=data[ix,] #get data for just the ith choice
+  for (j in 1:iter) { #loop over iter to produce a bunch of random values of P_H1 and P_H2 for the ith choice
+    perm_visit=sample(data_for_perm$`visited?`) #permute the actual choice
+    ix_Uij=which(perm_visit==1) #find the row number of the sampled random choice
+    
+    #implement equation 2.1 for the random choices:
+    P_H1_perm=exp(data_for_perm$H1_reward[ix_Uij])/
+      sum(exp(data_for_perm$H1_reward))
+    
+    P_H2_perm=exp(data_for_perm$H2_reward[ix_Uij])/
+      sum(exp(data_for_perm$H2_reward))
+    
+    #save results as variable
+    all_perm_P_H1[i,j]=P_H1_perm
+    all_perm_P_H2[i,j]=P_H2_perm
+    
+  }
+  
+}
+
+#calculate the randomized Ts to get distribution for each:
+perm_T1 <- colSums(log(all_perm_P_H1))
+perm_T2 <- colSums(log(all_perm_P_H2))
+
+```
+
+Calculate the 2-tailed probabilities of T1 and T2, each differ from the permuted values, and plot histograms showing these results
+
+```{r}
+
+#calculate 2-tailed probabilities 
+
+pH1 <- (sum(perm_T1>=abs(T1))+sum(perm_T1<(-abs(T1))))/iter
+pH2 <- (sum(perm_T2>=abs(T2))+sum(perm_T2<(-abs(T2))))/iter
+
+#plot
+
+par(mfrow=c(1,2))
+
+hist(perm_T1,xlab = "Permuted T1", col = "white", main="Permuted T1", las=1, xlim = c(-443, -439))
+abline(v=T1, lwd=3, col="blue")
+
+hist(perm_T2,xlab = "Permuted T2", col = "white", main="Permuted T2", las=1)
+abline(v=T2, lwd=3, col="red")
+```
+Compare H1 and H2
+"If the model corresponding to T2 was no better able to predict the observed choices than the model corresponding to T1, then T2 should not differ markedly from the median value of ST1. If T2 had a value that was significantly above the median of ST1 (specifically, if the upper 5%/2 tests 1/4 2.5% tail of CD (ST1)), then T1 was rejected in the favor of T2"
+
+```{r}
+pH2_H1 <- (sum(perm_T1>=(T2))+sum(perm_T1<(-abs(T2))))/iter
+
+hist(perm_T1, xlab = "Permuted T1", col = "white", main = "Permuted T1", las=1, xlim = c(-443, -439))
+abline(v=T1, lwd=3, col="blue")
+abline(v=T2, lwd=3, col="red")
+
+```       
+
+Plot movements as a network
+
+```{r}
+
+data_el <- data[data$`visited?`==1,]
+
+library(igraph)
+
+net<- graph.edgelist(as.matrix(data_el[, c(2,3)]), directed = TRUE)
+plot(net)
+
+```
+
+
+Discussion and Reflection 
+
+Some challenges: the author used 'choice' platform in JMP to analyze the movement decisions. They mentioned this was similar to GLMM but also describe how this is different. I found it difficult to replicate their models and didn't think they described these in great detail in the paper itself (I relied heavily on the supplemental material). I also found the data in the excel sheet to be confusing with how they described variables (it would have been nice to see the models they used listed with the variables named in the same convention as in their data) as well as detail pertaining to their model selection. 
+Additionally, I often found it unclear how they analyzed/processed some of the original data or at least found it difficult replicating this (could have been do to the complicated nature of this or parts were unclear?).There also weren't really any visualizations for me to replicate as this paper was more stats heavy which I found a bit difficult. 
+Overall, I did find it difficult (and frustrating) to replicate the analyses in this study. I was not very successful in replicating their results but did enjoy playing around with this dataset (especially creating visualizations as the paper itself did not include these). 
